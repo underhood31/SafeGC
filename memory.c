@@ -29,6 +29,7 @@ typedef unsigned long long ulong64;
 #define ADDR_TO_SEGMENT(x) (Segment*)(((ulong64)(x)) & ~(SEGMENT_SIZE-1))
 #define FREE 1
 #define MARK 2
+#define INLIST 4
 #define GC_THRESHOLD (32ULL << 20)
 
 long long NumGCTriggered = 0;
@@ -91,6 +92,7 @@ static char* getDataPtr(Segment *Seg) { return Seg->Other.DataPtr; }
 static void setBigAlloc(Segment *Seg, int BigAlloc) { Seg->Other.BigAlloc = BigAlloc; }
 static int getBigAlloc(Segment *Seg) { return Seg->Other.BigAlloc; }
 static void myfree(void *Ptr);
+static void scanRoots(unsigned *Top, unsigned *Bottom);
 static void checkAndRunGC();
 
 static void addToSegmentList(Segment *Seg)
@@ -323,7 +325,6 @@ void *_mymalloc(size_t Size)
 	Header->Type = 0;
 	return AllocPtr + OBJ_HEADER_SIZE;
 }
-static void scanRoots(unsigned *Top, unsigned *Bottom);
 
 /* scan objects in the scanner list.
  * add newly encountered unmarked objects 
@@ -332,20 +333,17 @@ static void scanRoots(unsigned *Top, unsigned *Bottom);
 void scanner()
 {
 	ScannerList *temp = scannerlist_start;
-	int size=0;
 	while(temp!=NULL)
 	{
-		if (temp->addr->Status!=FREE && temp->addr->Status!=MARK)
+		if (getSizeMetadata(ADDR_TO_PAGE(temp->addr))[0]<PAGE_SIZE)
 		{
-			temp->addr->Status=MARK;
-			scanRoots((unsigned*)((void*)temp->addr+OBJ_HEADER_SIZE),(unsigned*)((void*)temp->addr+temp->addr->Size));
-			// printf("Status %d\n",temp->addr->Status);
+			if (temp->addr->Status==MARK)
+			{
+				scanRoots((unsigned*)((void*)temp->addr+OBJ_HEADER_SIZE),(unsigned*)((void*)temp->addr+temp->addr->Size));
+			}
 		}
-			++size;
 		temp=temp->next;
-		// printf("%d\n", size);
 	}
-	// printf("%d\n", size);
 
 }
 
@@ -360,67 +358,40 @@ void sweep()
 		void *start=getDataPtr(seg);
 		void *end=getAllocPtr(seg);
 		int big=getBigAlloc(seg);
-		if (big!=1)
-		{
-			
-			ObjHeader *temp=(ObjHeader*)ADDR_TO_PAGE(start);
-			void* i=(void*)temp;
-			while((void*)temp<end){
-				if (getSizeMetadata(ADDR_TO_PAGE(temp))[0]<PAGE_SIZE)
-				{
+		void *cur=start;
 
-					if ((void*)temp-i>=PAGE_SIZE)
-					{
-						i=ADDR_TO_PAGE(i)+PAGE_SIZE;
-						temp=(ObjHeader*)i;
-						continue;
-					}
-					if(temp->Status!=MARK && temp->Status!=FREE)
-							myfree(temp+1);
-						
-					temp = (ObjHeader*)(temp + temp->Size); 
-
-
-				}
-				else
-				{
-					temp=(ObjHeader*)(ADDR_TO_PAGE(temp)+PAGE_SIZE);
-				}
-			}
-		}
-		else{
-			ObjHeader *temp=(ObjHeader*)start;
-			unsigned short *sizemeta=getSizeMetadata(ADDR_TO_PAGE(temp));
-			short free=sizemeta[0];
-			if (free<PAGE_SIZE){
-
-				// printf("Status: %d, Size: %d\n", temp->Status, temp->Size);
-				if (temp->Status!=MARK && temp->Status!=FREE)
+		while(cur<end){
+			if (getSizeMetadata(ADDR_TO_PAGE(cur))[0]<PAGE_SIZE)
+			{
+				ObjHeader *temp=(ObjHeader*)cur;
+				cur=cur+temp->Size;
+				if (temp->Status!=FREE && temp->Status!=MARK)
 				{
 					myfree(temp+1);
 				}
 			}
-			
+			else
+			{
+				cur=ADDR_TO_PAGE(cur)+PAGE_SIZE;
+			}
 		}
-
-
 
 		allSeg=allSeg->Next;
 	}
 	
-	// ScannerList *temp = scannerlist_start;
-	// int size=0;
-	// while(temp!=NULL)
-	// {
-	// 	if (temp->addr->Status==MARK)
-	// 	{
-	// 		temp->addr->Status=0;
-	// 	}
-	// 	ScannerList *del=temp;
-	// 	temp=temp->next;
-	// 	free(del);
-	// }
-	// scannerlist_start=scannerlist_end=NULL;
+	ScannerList *temp = scannerlist_start;
+	int size=0;
+	while(temp!=NULL)
+	{
+		if (getSizeMetadata(ADDR_TO_PAGE(temp->addr))[0]<PAGE_SIZE)
+		{
+			if (temp->addr->Status==MARK)
+			{
+				temp->addr->Status=INLIST;
+			}
+		}
+		temp=temp->next;
+	}
 }
 
 static int inSegmentList(void* addr){
@@ -429,7 +400,7 @@ static int inSegmentList(void* addr){
 	addr=ADDR_TO_SEGMENT(addr);
 	while(sl!=NULL)
 	{
-		if (addr==sl->Segment && page>=getDataPtr(sl->Segment) && page<=getAllocPtr(sl->Segment))
+		if (addr==sl->Segment)
 			return 1;
 		sl=sl->Next;
 	}
@@ -446,14 +417,11 @@ ObjHeader *findObjectHeader(void *addr)
 
 	if(!big)
 	{
-		// printf("SMALL\n");
 		for (int i = 0; i < PAGE_SIZE;)
 		{
-			// printf("I am here  %d\n",i);
 			ObjHeader *temp=(ObjHeader*)(page+i);
 			if (addr>=page+i+OBJ_HEADER_SIZE && addr<(page+i+temp->Size))
 			{
-				// printf("SMALL FOUND: %d   %d\n", temp->Status,temp->Size);
 				return temp;
 			}
 			else
@@ -464,7 +432,6 @@ ObjHeader *findObjectHeader(void *addr)
 	}
 	else
 	{
-		// printf("BIG\n");
 		SzMeta = getSizeMetadata(page);
 		big=SzMeta[0];
 		while(big!=1){
@@ -473,7 +440,6 @@ ObjHeader *findObjectHeader(void *addr)
 			big=SzMeta[0];
 		}
 		ObjHeader *t=(ObjHeader*)(page);
-		// printf("BIG FOUND: %d   %d\n", t->Status,t->Size);
 
 		return t;
 		
@@ -485,11 +451,6 @@ void addToScannerList(ObjHeader *obj)
 {
 	ScannerList *newItem=(ScannerList*)malloc(sizeof(ScannerList));
 	newItem->addr=obj;
-	if (obj->Status==MARK || obj->Status==FREE)
-	{
-		return;
-	}
-
 	if (scannerlist_start==NULL)
 	{
 		scannerlist_start=newItem;
@@ -514,26 +475,24 @@ static void scanRoots(unsigned *Top, unsigned *Bottom)
 
 	while(curAddr<(unsigned long*)Bottom)
 	{
-		// if (*curAddr==0)
-		// {
-		// 	curAddr+=1;
-		// 	continue;
-		// }
-
+		
 		if (inSegmentList((void*)*curAddr) )
 		{
-			// printf("SEGMENT\n");
 			ObjHeader * obj =  findObjectHeader((char*)(*curAddr)); ///DEREFERENCING THE POINTERS
-			if (obj==NULL)
-			{
-				// exit(1);
-				curAddr+=1;
-				continue;
-			}
+			assert(obj!=NULL);
 			if (obj->Status!=MARK && obj->Status!=FREE)
 			{
-				// printf("PAGE\n");
-				addToScannerList(obj);
+				if (obj->Status==INLIST)
+				{
+					obj->Status=MARK;
+				}
+				else
+				{
+					obj->Status=MARK;
+					addToScannerList(obj);			
+				}
+
+
 			}
 
 		}
