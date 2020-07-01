@@ -29,7 +29,7 @@ typedef unsigned long long ulong64;
 #define ADDR_TO_SEGMENT(x) (Segment*)(((ulong64)(x)) & ~(SEGMENT_SIZE-1))
 #define FREE 1
 #define MARK 2
-#define INLIST 4
+// #define INLIST 4
 #define GC_THRESHOLD (32ULL << 20)
 
 long long NumGCTriggered = 0;
@@ -337,13 +337,13 @@ void scanner()
 	{
 		if (getSizeMetadata(ADDR_TO_PAGE(temp->addr))[0]<PAGE_SIZE)
 		{
-			if (temp->addr->Status==MARK)
-			{
 				scanRoots((unsigned*)((void*)temp->addr+OBJ_HEADER_SIZE),(unsigned*)((void*)temp->addr+temp->addr->Size));
-			}
 		}
+		ScannerList *del=temp;
 		temp=temp->next;
+		free(del);
 	}
+	scannerlist_end=scannerlist_start=NULL;
 
 }
 
@@ -357,7 +357,6 @@ void sweep()
 
 		void *start=getDataPtr(seg);
 		void *end=getAllocPtr(seg);
-		int big=getBigAlloc(seg);
 		void *cur=start;
 
 		while(cur<end){
@@ -369,6 +368,10 @@ void sweep()
 				{
 					myfree(temp+1);
 				}
+				else if (temp->Status==MARK)
+				{
+					temp->Status=0;
+				}
 			}
 			else
 			{
@@ -377,20 +380,6 @@ void sweep()
 		}
 
 		allSeg=allSeg->Next;
-	}
-	
-	ScannerList *temp = scannerlist_start;
-	int size=0;
-	while(temp!=NULL)
-	{
-		if (getSizeMetadata(ADDR_TO_PAGE(temp->addr))[0]<PAGE_SIZE)
-		{
-			if (temp->addr->Status==MARK)
-			{
-				temp->addr->Status=INLIST;
-			}
-		}
-		temp=temp->next;
 	}
 }
 
@@ -482,17 +471,9 @@ static void scanRoots(unsigned *Top, unsigned *Bottom)
 			assert(obj!=NULL);
 			if (obj->Status!=MARK && obj->Status!=FREE)
 			{
-				if (obj->Status==INLIST)
-				{
-					obj->Status=MARK;
-				}
-				else
-				{
-					obj->Status=MARK;
-					addToScannerList(obj);			
-				}
-
-
+				
+				obj->Status=MARK;
+				addToScannerList(obj);			
 			}
 
 		}
